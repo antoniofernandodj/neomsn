@@ -1,0 +1,35 @@
+[package]
+name = "neomsn-server"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+neomsn-shared = { path = "../neomsn-shared" }
+
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+axum = { version = "0.7", features = ["ws"] }
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+sea-orm = { version = "1", features = [
+    "sqlx-sqlite",
+    "runtime-tokio-rustls",
+    "macros",
+    "with-uuid",
+    "with-chrono",
+] }
+sea-orm-migration = { version = "1", features = [
+    "sqlx-sqlite",
+    "runtime-tokio-rustls",
+] }
+
+argon2 = "0.5"
+jsonwebtoken = "9"
+chrono = { version = "0.4", features = ["serde"] }
+async-trait = "0.1"

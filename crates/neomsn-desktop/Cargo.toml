@@ -1,0 +1,17 @@
+[package]
+name = "neomsn-desktop"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+neomsn-shared = { path = "../neomsn-shared", features = ["widgets"] }
+
+iced = { version = "0.13", features = ["image", "tokio"] }
+tokio = { workspace = true }
+uuid = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = "0.3"
+reqwest = { version = "0.12", features = ["json"] }

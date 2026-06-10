@@ -1,0 +1,15 @@
+[workspace]
+members = [
+    "crates/neomsn-shared",
+    "crates/neomsn-server",
+    "crates/neomsn-desktop",
+]
+resolver = "2"
+
+[workspace.dependencies]
+uuid = { version = "1", features = ["v4", "serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+tracing = "0.1"
