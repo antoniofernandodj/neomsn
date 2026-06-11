@@ -25,6 +25,8 @@ pub enum Opcode {
     RoomListResp = 0x27,
     RoomMembers  = 0x28,
     RoomEvent    = 0x29,
+    ChatInvite   = 0x2A,
+    ChatJoined   = 0x2B,
 
     // 0x30–0x3F  Direct Messages
     DmOpen     = 0x30,
@@ -85,6 +87,8 @@ impl TryFrom<u8> for Opcode {
             0x27 => Ok(Self::RoomListResp),
             0x28 => Ok(Self::RoomMembers),
             0x29 => Ok(Self::RoomEvent),
+            0x2A => Ok(Self::ChatInvite),
+            0x2B => Ok(Self::ChatJoined),
             0x30 => Ok(Self::DmOpen),
             0x31 => Ok(Self::DmOpenResp),
             0x40 => Ok(Self::PresenceSet),

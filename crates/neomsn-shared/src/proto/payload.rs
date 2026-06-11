@@ -186,6 +186,10 @@ impl AuthFail {
 }
 
 // ─── 0x10  MSG_CHUNK ─────────────────────────────────────────────────────────
+// An edit to the streaming message: truncate the accumulated text to
+// `truncate_to` bytes (the common prefix with the previous state), then append
+// `delta`. Pure typing is truncate_to == current length; backspace is a
+// shorter truncate_to with an empty delta.
 
 #[derive(Debug, Clone)]
 pub struct MsgChunk {
@@ -193,6 +197,7 @@ pub struct MsgChunk {
     pub context_type: ContextType,
     pub context_id: Uuid,
     pub author_id: Uuid,
+    pub truncate_to: u32,
     pub delta: String,
 }
 
@@ -203,6 +208,7 @@ impl MsgChunk {
         w.u8(self.context_type as u8);
         w.uuid(&self.context_id);
         w.uuid(&self.author_id);
+        w.u32(self.truncate_to);
         w.string(&self.delta);
         w.finish()
     }
@@ -213,6 +219,7 @@ impl MsgChunk {
             context_type: ContextType::try_from(r.u8()?)?,
             context_id: r.uuid()?,
             author_id: r.uuid()?,
+            truncate_to: r.u32()?,
             delta: r.string()?,
         })
     }
@@ -320,6 +327,129 @@ impl RoomListResp {
     }
 }
 
+// ─── 0x2A  CHAT_INVITE ───────────────────────────────────────────────────────
+// Invite a user into the current conversation (MSN style). If the context is a
+// DM, the server upgrades it to an ephemeral room with all three participants.
+
+#[derive(Debug, Clone)]
+pub struct ChatInvite {
+    pub context_type: ContextType,
+    pub context_id: Uuid,
+    pub user_id: Uuid,
+}
+
+impl ChatInvite {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u8(self.context_type as u8);
+        w.uuid(&self.context_id);
+        w.uuid(&self.user_id);
+        w.finish()
+    }
+    pub fn decode(buf: &[u8]) -> Result<Self, DecodeError> {
+        let mut r = Reader::new(buf);
+        Ok(Self {
+            context_type: ContextType::try_from(r.u8()?)?,
+            context_id: r.uuid()?,
+            user_id: r.uuid()?,
+        })
+    }
+}
+
+// ─── 0x2B  CHAT_JOINED ───────────────────────────────────────────────────────
+// Sent to every participant of a group conversation when it is created or when
+// they are pulled into it. `origin_context_id` is the DM conversation the room
+// was upgraded from (nil UUID when not applicable) so existing windows can be
+// converted in place.
+
+#[derive(Debug, Clone)]
+pub struct MemberInfo {
+    pub user_id: Uuid,
+    pub username: String,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChatJoined {
+    pub room_id: Uuid,
+    pub origin_context_id: Uuid,
+    pub inviter_name: String,
+    pub members: Vec<MemberInfo>,
+}
+
+impl ChatJoined {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.uuid(&self.room_id);
+        w.uuid(&self.origin_context_id);
+        w.string(&self.inviter_name);
+        w.u32(self.members.len() as u32);
+        for m in &self.members {
+            w.uuid(&m.user_id);
+            w.string(&m.username);
+            w.string(&m.display_name);
+        }
+        w.finish()
+    }
+    pub fn decode(buf: &[u8]) -> Result<Self, DecodeError> {
+        let mut r = Reader::new(buf);
+        let room_id = r.uuid()?;
+        let origin_context_id = r.uuid()?;
+        let inviter_name = r.string()?;
+        let count = r.u32()? as usize;
+        let mut members = Vec::with_capacity(count);
+        for _ in 0..count {
+            members.push(MemberInfo {
+                user_id: r.uuid()?,
+                username: r.string()?,
+                display_name: r.string()?,
+            });
+        }
+        Ok(Self { room_id, origin_context_id, inviter_name, members })
+    }
+}
+
+// ─── 0x29  ROOM_EVENT ────────────────────────────────────────────────────────
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoomEventKind { Joined = 0, Left = 1 }
+
+impl TryFrom<u8> for RoomEventKind {
+    type Error = DecodeError;
+    fn try_from(v: u8) -> Result<Self, Self::Error> {
+        match v { 0 => Ok(Self::Joined), 1 => Ok(Self::Left), _ => Err(DecodeError) }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RoomEvent {
+    pub room_id: Uuid,
+    pub kind: RoomEventKind,
+    pub user_id: Uuid,
+    pub display_name: String,
+}
+
+impl RoomEvent {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.uuid(&self.room_id);
+        w.u8(self.kind as u8);
+        w.uuid(&self.user_id);
+        w.string(&self.display_name);
+        w.finish()
+    }
+    pub fn decode(buf: &[u8]) -> Result<Self, DecodeError> {
+        let mut r = Reader::new(buf);
+        Ok(Self {
+            room_id: r.uuid()?,
+            kind: RoomEventKind::try_from(r.u8()?)?,
+            user_id: r.uuid()?,
+            display_name: r.string()?,
+        })
+    }
+}
+
 // ─── 0x30  DM_OPEN ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -374,6 +504,83 @@ impl PresenceUpdate {
     pub fn decode(buf: &[u8]) -> Result<Self, DecodeError> {
         let mut r = Reader::new(buf);
         Ok(Self { user_id: r.uuid()?, status: PresenceStatus::try_from(r.u8()?)? })
+    }
+}
+
+// ─── 0x50  SYNC_REQUEST ──────────────────────────────────────────────────────
+// Ask for the most recent completed messages of a context (history load).
+
+#[derive(Debug, Clone)]
+pub struct SyncRequest {
+    pub context_type: ContextType,
+    pub context_id: Uuid,
+    pub limit: u32,
+}
+
+impl SyncRequest {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u8(self.context_type as u8);
+        w.uuid(&self.context_id);
+        w.u32(self.limit);
+        w.finish()
+    }
+    pub fn decode(buf: &[u8]) -> Result<Self, DecodeError> {
+        let mut r = Reader::new(buf);
+        Ok(Self {
+            context_type: ContextType::try_from(r.u8()?)?,
+            context_id: r.uuid()?,
+            limit: r.u32()?,
+        })
+    }
+}
+
+// ─── 0x51  SYNC_RESPONSE ─────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct HistoryMessage {
+    pub msg_id: Uuid,
+    pub author_id: Uuid,
+    pub author_name: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SyncResponse {
+    pub context_type: ContextType,
+    pub context_id: Uuid,
+    pub messages: Vec<HistoryMessage>,
+}
+
+impl SyncResponse {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u8(self.context_type as u8);
+        w.uuid(&self.context_id);
+        w.u32(self.messages.len() as u32);
+        for m in &self.messages {
+            w.uuid(&m.msg_id);
+            w.uuid(&m.author_id);
+            w.string(&m.author_name);
+            w.string(&m.content);
+        }
+        w.finish()
+    }
+    pub fn decode(buf: &[u8]) -> Result<Self, DecodeError> {
+        let mut r = Reader::new(buf);
+        let context_type = ContextType::try_from(r.u8()?)?;
+        let context_id = r.uuid()?;
+        let count = r.u32()? as usize;
+        let mut messages = Vec::with_capacity(count);
+        for _ in 0..count {
+            messages.push(HistoryMessage {
+                msg_id: r.uuid()?,
+                author_id: r.uuid()?,
+                author_name: r.string()?,
+                content: r.string()?,
+            });
+        }
+        Ok(Self { context_type, context_id, messages })
     }
 }
 

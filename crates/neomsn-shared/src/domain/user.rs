@@ -18,7 +18,17 @@ pub enum PresenceStatus {
     Offline,
 }
 
+impl std::fmt::Display for PresenceStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
 impl PresenceStatus {
+    /// The statuses a user can pick for themselves.
+    pub const SELECTABLE: [PresenceStatus; 4] =
+        [Self::Online, Self::Away, Self::Busy, Self::Invisible];
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Online    => "Online",

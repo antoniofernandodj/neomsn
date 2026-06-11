@@ -1,6 +1,6 @@
 use iced::{
     widget::container,
-    Border, Color, Element, Length,
+    Border, Element, Length,
 };
 use crate::domain::user::PresenceStatus;
 use super::theme::MsnTheme;

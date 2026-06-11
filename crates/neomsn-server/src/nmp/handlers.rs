@@ -1,14 +1,15 @@
 use anyhow::Result;
 use chrono::Utc;
-use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, Set};
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect, Set};
 use tracing::warn;
 use uuid::Uuid;
 use neomsn_shared::proto::{
     Frame, Opcode,
     payload::{
-        self, AuthFail, AuthOk, ContactAcceptOk, ContactAddOk, ContactEntry, ContactListResp,
-        ContactRequest, ContextType, DmOpenResp, MsgChunk, MsgComplete, MsgDelete,
-        PresenceStatus as PayloadPresence, PresenceUpdate, ProfileResp, RoomListResp,
+        self, AuthFail, AuthOk, ChatJoined, ContactAcceptOk, ContactAddOk, ContactEntry,
+        ContactListResp, ContactRequest, ContextType, DmOpenResp, HistoryMessage, MemberInfo,
+        MsgChunk, MsgComplete, MsgDelete, PresenceStatus as PayloadPresence, PresenceUpdate,
+        ProfileResp, RoomEvent, RoomEventKind, RoomListResp, SyncResponse,
     },
 };
 use crate::{
@@ -57,6 +58,8 @@ pub async fn dispatch(
         Opcode::RoomList      => handle_room_list(frame, session, state).await?,
         Opcode::RoomJoin      => handle_room_join(frame, session, state).await?,
         Opcode::RoomLeave     => handle_room_leave(frame, session, state).await?,
+        Opcode::ChatInvite    => handle_chat_invite(frame, session, state).await?,
+        Opcode::SyncRequest   => handle_sync_request(frame, session, state).await?,
         Opcode::PresenceSet   => handle_presence_set(frame, session, state).await?,
         Opcode::ProfileGet    => handle_profile_get(frame, session, state).await?,
         Opcode::ProfileUpdate => handle_profile_update(frame, session, state).await?,
@@ -528,6 +531,176 @@ async fn handle_room_leave(frame: Frame, session: &mut SessionState, state: &Sha
         am.left_at = Set(Some(Utc::now()));
         am.update(&state.db).await?;
     }
+
+    // Tell the remaining participants.
+    let display_name = user::Entity::find_by_id(user_id).one(&state.db).await?
+        .map(|u| u.display_name).unwrap_or_default();
+    state.broadcast_room(p.room_id, Frame::new(
+        Opcode::RoomEvent,
+        RoomEvent { room_id: p.room_id, kind: RoomEventKind::Left, user_id, display_name }.encode(),
+    ), Some(user_id)).await;
+    Ok(())
+}
+
+// ─── CHAT_INVITE ─────────────────────────────────────────────────────────────
+// MSN-style: inviting someone into a DM upgrades it to an ephemeral room with
+// all three participants; inviting into a room just adds the new member.
+
+async fn handle_chat_invite(frame: Frame, session: &mut SessionState, state: &SharedState) -> Result<()> {
+    let p = payload::ChatInvite::decode(&frame.payload).map_err(|_| anyhow::anyhow!("decode"))?;
+    let inviter_id = session.user_id.unwrap();
+
+    // Invitee must be online (the conversation is a live session, like MSN).
+    if !state.sessions.read().await.contains_key(&p.user_id) {
+        session.send(Frame::new(Opcode::Error,
+            payload::Error { code: 409, message: "esse contato não está online".into() }.encode())).await;
+        return Ok(());
+    }
+
+    let inviter = user::Entity::find_by_id(inviter_id).one(&state.db).await?
+        .ok_or_else(|| anyhow::anyhow!("inviter not found"))?;
+
+    let member_infos = |users: &[user::Model]| -> Vec<MemberInfo> {
+        users.iter().map(|u| MemberInfo {
+            user_id: u.id,
+            username: u.username.clone(),
+            display_name: u.display_name.clone(),
+        }).collect()
+    };
+
+    match p.context_type {
+        ContextType::Dm => {
+            let conv = direct_conversation::Entity::find_by_id(p.context_id)
+                .one(&state.db).await?
+                .ok_or_else(|| anyhow::anyhow!("conversation not found"))?;
+
+            let participant_ids = [conv.user_a, conv.user_b, p.user_id];
+            let now = Utc::now();
+
+            let new_room = room::ActiveModel {
+                id: Set(Uuid::new_v4()),
+                name: Set("Conversa em grupo".into()),
+                description: Set(String::new()),
+                created_by: Set(inviter_id),
+                created_at: Set(now),
+                deleted_at: Set(None),
+            }.insert(&state.db).await?;
+
+            for uid in participant_ids {
+                let role = if uid == inviter_id { "owner" } else { "member" };
+                room_member::ActiveModel {
+                    room_id: Set(new_room.id),
+                    user_id: Set(uid),
+                    role: Set(role.into()),
+                    joined_at: Set(now),
+                    left_at: Set(None),
+                }.insert(&state.db).await?;
+            }
+            state.room_members.write().await
+                .entry(new_room.id).or_default()
+                .extend(participant_ids);
+
+            let users = user::Entity::find()
+                .filter(user::Column::Id.is_in(participant_ids))
+                .all(&state.db).await?;
+            let joined = ChatJoined {
+                room_id: new_room.id,
+                origin_context_id: conv.id,
+                inviter_name: inviter.display_name.clone(),
+                members: member_infos(&users),
+            };
+
+            // Existing participants convert their DM window; the invitee opens one.
+            let frame = Frame::new(Opcode::ChatJoined, joined.encode());
+            for uid in participant_ids {
+                state.send_to_user(uid, frame.clone()).await;
+            }
+        }
+        ContextType::Room => {
+            let already = room_member::Entity::find()
+                .filter(room_member::Column::RoomId.eq(p.context_id))
+                .filter(room_member::Column::UserId.eq(p.user_id))
+                .filter(room_member::Column::LeftAt.is_null())
+                .one(&state.db).await?.is_some();
+            if !already {
+                room_member::ActiveModel {
+                    room_id: Set(p.context_id),
+                    user_id: Set(p.user_id),
+                    role: Set("member".into()),
+                    joined_at: Set(Utc::now()),
+                    left_at: Set(None),
+                }.insert(&state.db).await?;
+            }
+            state.room_members.write().await
+                .entry(p.context_id).or_default()
+                .insert(p.user_id);
+
+            let member_ids: Vec<Uuid> = state.room_members.read().await
+                .get(&p.context_id).map(|s| s.iter().copied().collect()).unwrap_or_default();
+            let users = user::Entity::find()
+                .filter(user::Column::Id.is_in(member_ids.clone()))
+                .all(&state.db).await?;
+
+            let invitee = users.iter().find(|u| u.id == p.user_id)
+                .ok_or_else(|| anyhow::anyhow!("invitee not found"))?;
+
+            // Invitee gets the full member list; the others get a join event.
+            state.send_to_user(p.user_id, Frame::new(Opcode::ChatJoined, ChatJoined {
+                room_id: p.context_id,
+                origin_context_id: Uuid::nil(),
+                inviter_name: inviter.display_name.clone(),
+                members: member_infos(&users),
+            }.encode())).await;
+
+            let event = Frame::new(Opcode::RoomEvent, RoomEvent {
+                room_id: p.context_id,
+                kind: RoomEventKind::Joined,
+                user_id: invitee.id,
+                display_name: invitee.display_name.clone(),
+            }.encode());
+            for uid in member_ids {
+                if uid == p.user_id { continue; }
+                state.send_to_user(uid, event.clone()).await;
+            }
+        }
+    }
+    Ok(())
+}
+
+// ─── SYNC_REQUEST ────────────────────────────────────────────────────────────
+// History load: return the most recent completed messages of a context.
+
+async fn handle_sync_request(frame: Frame, session: &mut SessionState, state: &SharedState) -> Result<()> {
+    let p = payload::SyncRequest::decode(&frame.payload).map_err(|_| anyhow::anyhow!("decode"))?;
+
+    let mut msgs = message::Entity::find()
+        .filter(message::Column::ContextId.eq(p.context_id))
+        .filter(message::Column::Status.eq("complete"))
+        .order_by_desc(message::Column::StartedAt)
+        .limit(p.limit as u64)
+        .all(&state.db).await?;
+    msgs.reverse(); // chronological order
+
+    let author_ids: Vec<Uuid> = msgs.iter().map(|m| m.author_id).collect();
+    let authors: std::collections::HashMap<Uuid, String> = user::Entity::find()
+        .filter(user::Column::Id.is_in(author_ids))
+        .all(&state.db).await?
+        .into_iter()
+        .map(|u| (u.id, u.display_name))
+        .collect();
+
+    let resp = SyncResponse {
+        context_type: p.context_type,
+        context_id: p.context_id,
+        messages: msgs.into_iter().map(|m| HistoryMessage {
+            msg_id: m.id,
+            author_id: m.author_id,
+            author_name: authors.get(&m.author_id).cloned().unwrap_or_default(),
+            content: m.content,
+        }).collect(),
+    };
+
+    session.send(Frame::new(Opcode::SyncResponse, resp.encode())).await;
     Ok(())
 }
 
@@ -589,6 +762,68 @@ async fn handle_profile_update(frame: Frame, session: &mut SessionState, state: 
     }
 
     session.send(Frame::new(Opcode::ProfileUpdateOk, vec![])).await;
+    Ok(())
+}
+
+// ─── disconnect cleanup ──────────────────────────────────────────────────────
+// Called after the TCP connection drops and the session was removed from state.
+
+pub async fn handle_disconnect(user_id: Uuid, state: &SharedState) -> Result<()> {
+    // Another device may still be connected; only then the user stays online.
+    if state.sessions.read().await.contains_key(&user_id) {
+        return Ok(());
+    }
+
+    state.presence.write().await.insert(user_id, PayloadPresence::Offline);
+
+    let display_name = user::Entity::find_by_id(user_id).one(&state.db).await?
+        .map(|u| u.display_name).unwrap_or_default();
+
+    // Leave every live room (group conversations are session-scoped, like MSN).
+    let joined_rooms: Vec<Uuid> = {
+        let mut rooms = state.room_members.write().await;
+        let ids: Vec<Uuid> = rooms.iter()
+            .filter(|(_, members)| members.contains(&user_id))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in &ids {
+            rooms.get_mut(id).unwrap().remove(&user_id);
+        }
+        ids
+    };
+    for room_id in joined_rooms {
+        if let Some(m) = room_member::Entity::find()
+            .filter(room_member::Column::RoomId.eq(room_id))
+            .filter(room_member::Column::UserId.eq(user_id))
+            .filter(room_member::Column::LeftAt.is_null())
+            .one(&state.db).await? {
+            let mut am: room_member::ActiveModel = m.into();
+            am.left_at = Set(Some(Utc::now()));
+            am.update(&state.db).await?;
+        }
+        state.broadcast_room(room_id, Frame::new(
+            Opcode::RoomEvent,
+            RoomEvent {
+                room_id,
+                kind: RoomEventKind::Left,
+                user_id,
+                display_name: display_name.clone(),
+            }.encode(),
+        ), Some(user_id)).await;
+    }
+
+    // Notify accepted contacts that this user went offline.
+    let contacts = contact::Entity::find()
+        .filter(contact::Column::OwnerId.eq(user_id))
+        .filter(contact::Column::State.eq("accepted"))
+        .all(&state.db).await?;
+    let update = Frame::new(
+        Opcode::PresenceUpdate,
+        PresenceUpdate { user_id, status: PayloadPresence::Offline }.encode(),
+    );
+    for c in contacts {
+        state.send_to_user(c.contact_id, update.clone()).await;
+    }
     Ok(())
 }
 

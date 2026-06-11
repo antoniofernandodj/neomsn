@@ -1,45 +1,54 @@
 use iced::{
-    widget::{button, column, container, row, text},
+    widget::{button, container, row, text, Space},
     Alignment, Element, Length, Padding,
 };
-use crate::domain::contact::Contact;
-use super::{status_dot, theme::MsnTheme};
+use crate::domain::{contact::Contact, user::PresenceStatus};
+use super::{buddy_icon::buddy_icon, theme::MsnTheme};
 
-/// A single row in the contact list — avatar placeholder, name, presence dot.
+/// A single row in the contact list, WLM style: indented buddy silhouette
+/// tinted by presence, name, and the status in parentheses when not online.
 pub fn contact_item<Message>(contact: &Contact, on_open: Message) -> Element<'_, Message>
 where
     Message: Clone + 'static,
 {
-    let dot = status_dot(contact.presence);
+    let offline = contact.presence == PresenceStatus::Offline;
 
     let name = text(&contact.display_name)
-        .size(14)
-        .color(MsnTheme::TEXT_PRIMARY);
+        .size(13)
+        .color(if offline { MsnTheme::TEXT_SECONDARY } else { MsnTheme::TEXT_PRIMARY });
 
-    let personal_msg = text(contact.presence.label())
-        .size(11)
-        .color(MsnTheme::TEXT_SECONDARY);
+    let status_suffix: Element<'_, Message> = match contact.presence {
+        PresenceStatus::Online | PresenceStatus::Offline => Space::with_width(0).into(),
+        s => text(format!(" ({})", s.label()))
+            .size(12)
+            .color(MsnTheme::TEXT_SECONDARY)
+            .into(),
+    };
 
-    let info = column![name, personal_msg].spacing(2);
+    let inner = row![
+        Space::with_width(Length::Fixed(14.0)),
+        buddy_icon(contact.presence, 17.0),
+        name,
+        status_suffix,
+    ]
+    .spacing(5)
+    .align_y(Alignment::Center);
 
-    let row = row![dot, info]
-        .spacing(8)
-        .align_y(Alignment::Center);
-
-    let inner = container(row)
-        .padding(Padding::from([6, 10]))
-        .width(Length::Fill);
-
-    button(inner)
-        .on_press(on_open)
-        .style(|theme, status| {
-            let mut s = button::text(theme, status);
-            s.background = Some(iced::Background::Color(match status {
-                button::Status::Hovered | button::Status::Pressed => MsnTheme::BG_HOVER,
-                _ => iced::Color::TRANSPARENT,
-            }));
-            s
-        })
-        .width(Length::Fill)
-        .into()
+    button(
+        container(inner)
+            .padding(Padding::from([3, 6]))
+            .width(Length::Fill),
+    )
+    .on_press(on_open)
+    .padding(0)
+    .style(|theme, status| {
+        let mut s = button::text(theme, status);
+        s.background = Some(iced::Background::Color(match status {
+            button::Status::Hovered | button::Status::Pressed => MsnTheme::BG_HOVER,
+            _ => iced::Color::TRANSPARENT,
+        }));
+        s
+    })
+    .width(Length::Fill)
+    .into()
 }

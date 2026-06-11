@@ -43,7 +43,14 @@ impl Message {
         }
     }
 
-    pub fn apply_chunk(&mut self, delta: &str) {
+    /// Truncate the accumulated text to `truncate_to` bytes, then append `delta`.
+    pub fn apply_chunk(&mut self, truncate_to: usize, delta: &str) {
+        let mut t = truncate_to.min(self.content.len());
+        // Defensive: a diverged stream could land mid-codepoint.
+        while !self.content.is_char_boundary(t) {
+            t -= 1;
+        }
+        self.content.truncate(t);
         self.content.push_str(delta);
     }
 

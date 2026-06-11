@@ -1,10 +1,10 @@
 use iced::{
-    widget::{button, column, container, row, scrollable, text, text_input, Space},
-    Alignment, Element, Length, Padding,
+    widget::{button, column, container, pick_list, row, scrollable, text, text_input, Space},
+    Alignment, Element, Font, Length, Padding,
 };
 use neomsn_shared::{
     domain::{contact::Contact, user::PresenceStatus},
-    widgets::{contact_item, theme::MsnTheme},
+    widgets::{buddy_avatar, contact_item, theme::MsnTheme},
 };
 use uuid::Uuid;
 
@@ -49,40 +49,72 @@ impl ContactListScreen {
         }
     }
 
-    pub fn view(&self) -> Element<ContactListMsg> {
-        // ── Header ──
-        let name = text(&self.display_name).size(14).color(MsnTheme::TEXT_ON_ACCENT);
-        let pm   = text(&self.personal_message).size(11).color(iced::Color { a: 0.75, ..MsnTheme::TEXT_ON_ACCENT });
-
-        let status_btn = button(
-            text(self.status.label()).size(11).color(MsnTheme::TEXT_ON_ACCENT)
+    pub fn view(&self) -> Element<'_, ContactListMsg> {
+        // ── Header: avatar + name + status selector + personal message ──
+        let status_picker = pick_list(
+            PresenceStatus::SELECTABLE,
+            Some(self.status),
+            ContactListMsg::SetStatus,
         )
-        .style(button::text)
-        .padding(0);
+        .text_size(11)
+        .padding(Padding::from([1, 6]))
+        .style(|theme, status| {
+            let mut s = pick_list::default(theme, status);
+            s.background = iced::Background::Color(iced::Color::TRANSPARENT);
+            s.border = iced::Border {
+                color: MsnTheme::FRAME_BORDER,
+                width: 1.0,
+                radius: 3.0.into(),
+            };
+            s.text_color = MsnTheme::ACCENT;
+            s
+        });
+
+        let pm: Element<'_, ContactListMsg> = if self.personal_message.is_empty() {
+            text("<Digite uma mensagem pessoal>")
+                .size(11)
+                .font(Font { style: iced::font::Style::Italic, ..Font::DEFAULT })
+                .color(MsnTheme::TEXT_SECONDARY)
+                .into()
+        } else {
+            text(&self.personal_message)
+                .size(11)
+                .font(Font { style: iced::font::Style::Italic, ..Font::DEFAULT })
+                .color(MsnTheme::TEXT_SECONDARY)
+                .into()
+        };
 
         let header = container(
-            column![name, pm, status_btn].spacing(2)
+            row![
+                buddy_avatar(self.status, 52.0),
+                column![
+                    text(&self.display_name).size(14).color(MsnTheme::TEXT_PRIMARY),
+                    status_picker,
+                    pm,
+                ]
+                .spacing(2),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center),
         )
-        .style(|_| container::Style {
-            background: Some(iced::Background::Color(MsnTheme::HEADER_TOP)),
-            ..Default::default()
-        })
-        .padding(Padding::from([12, 14]))
+        .style(|_| MsnTheme::header_style())
+        .padding(Padding::from([10, 12]))
         .width(Length::Fill);
 
         // ── Search / Add ──
         let search = text_input("Pesquisar contatos…", &self.search)
             .on_input(ContactListMsg::SearchChanged)
-            .padding(6)
-            .size(13);
+            .padding(5)
+            .size(12);
 
         let add_row = row![
             text_input("Adicionar pelo usuário…", &self.add_input)
                 .on_input(ContactListMsg::AddContactInput)
                 .on_submit(ContactListMsg::AddContact)
-                .padding(6)
-                .size(13),
-            button(text("+").size(14))
+                .padding(5)
+                .size(12),
+            button(text("+").size(13))
+                .style(MsnTheme::classic_button)
                 .on_press(ContactListMsg::AddContact)
                 .padding(Padding::from([4, 10])),
         ]
@@ -93,17 +125,17 @@ impl ContactListScreen {
         let mut list = column![].spacing(0);
 
         if !self.pending_requests.is_empty() {
-            list = list.push(section_header(
-                format!("Solicitações ({})", self.pending_requests.len()),
-                iced::Color { r: 0.95, g: 0.88, b: 0.70, a: 1.0 },
-            ));
+            list = list.push(group_header(format!(
+                "Solicitações ({})",
+                self.pending_requests.len()
+            )));
             for req in &self.pending_requests {
                 list = list.push(pending_request_row(req));
             }
             list = list.push(Space::with_height(4));
         }
 
-        // ── Contact list ──
+        // ── Contact groups ──
         let query = self.search.to_lowercase();
 
         let online: Vec<&Contact> = self.contacts.iter()
@@ -114,31 +146,34 @@ impl ContactListScreen {
             .filter(|c| c.presence == PresenceStatus::Offline && matches_search(c, &query))
             .collect();
 
-        if !online.is_empty() {
-            list = list.push(section_header(
-                format!("Online ({})", online.len()),
-                iced::Color { r: 0.91, g: 0.93, b: 0.96, a: 1.0 },
-            ));
-            for c in online {
-                list = list.push(contact_item(c, ContactListMsg::OpenChat(c.user_id)));
-            }
+        list = list.push(group_header(format!("▾ Online ({})", online.len())));
+        for c in online {
+            list = list.push(contact_item(c, ContactListMsg::OpenChat(c.user_id)));
         }
-        if !offline.is_empty() {
-            list = list.push(Space::with_height(4));
-            list = list.push(section_header(
-                format!("Offline ({})", offline.len()),
-                iced::Color { r: 0.91, g: 0.93, b: 0.96, a: 1.0 },
-            ));
-            for c in offline {
-                list = list.push(contact_item(c, ContactListMsg::OpenChat(c.user_id)));
-            }
+        list = list.push(Space::with_height(4));
+        list = list.push(group_header(format!("▾ Offline ({})", offline.len())));
+        for c in offline {
+            list = list.push(contact_item(c, ContactListMsg::OpenChat(c.user_id)));
         }
 
-        let scrolled = scrollable(list).height(Length::Fill);
+        let scrolled = container(
+            scrollable(list).height(Length::Fill).width(Length::Fill),
+        )
+        .style(|_| container::Style {
+            background: Some(iced::Background::Color(MsnTheme::BG_PANEL)),
+            border: iced::Border {
+                color: MsnTheme::FRAME_BORDER,
+                width: 1.0,
+                radius: 0.0.into(),
+            },
+            ..Default::default()
+        })
+        .height(Length::Fill)
+        .width(Length::Fill);
 
         column![
             header,
-            container(column![search, Space::with_height(4), add_row].spacing(0))
+            container(column![search, Space::with_height(4), add_row])
                 .padding(Padding::from([6, 8]))
                 .width(Length::Fill),
             scrolled,
@@ -150,15 +185,15 @@ impl ContactListScreen {
 fn pending_request_row(req: &PendingRequest) -> Element<'_, ContactListMsg> {
     let uid = req.user_id;
 
-    let name = text(&req.display_name).size(13).color(MsnTheme::TEXT_PRIMARY);
+    let name = text(&req.display_name).size(12).color(MsnTheme::TEXT_PRIMARY);
     let username = text(format!("@{}", req.username)).size(11).color(MsnTheme::TEXT_SECONDARY);
 
-    let accept_btn = button(text("Aceitar").size(12).color(MsnTheme::ONLINE))
+    let accept_btn = button(text("Aceitar").size(11).color(MsnTheme::ONLINE))
         .style(button::text)
         .on_press(ContactListMsg::AcceptRequest(uid))
         .padding(Padding::from([2, 6]));
 
-    let reject_btn = button(text("Recusar").size(12).color(MsnTheme::BUSY))
+    let reject_btn = button(text("Recusar").size(11).color(MsnTheme::BUSY))
         .style(button::text)
         .on_press(ContactListMsg::RejectRequest(uid))
         .padding(Padding::from([2, 6]));
@@ -173,26 +208,19 @@ fn pending_request_row(req: &PendingRequest) -> Element<'_, ContactListMsg> {
         .spacing(4),
     )
     .style(|_| container::Style {
-        background: Some(iced::Background::Color(iced::Color { r: 1.0, g: 0.97, b: 0.88, a: 1.0 })),
-        border: iced::Border {
-            width: 0.0,
-            color: iced::Color::TRANSPARENT,
-            radius: 0.0.into(),
-        },
+        background: Some(iced::Background::Color(iced::Color {
+            r: 1.0, g: 0.97, b: 0.88, a: 1.0,
+        })),
         ..Default::default()
     })
-    .padding(Padding::from([6, 10]))
+    .padding(Padding::from([5, 10]))
     .width(Length::Fill)
     .into()
 }
 
-fn section_header(label: String, bg: iced::Color) -> Element<'static, ContactListMsg> {
-    container(text(label).size(11).color(MsnTheme::TEXT_SECONDARY))
-        .style(move |_| container::Style {
-            background: Some(iced::Background::Color(bg)),
-            ..Default::default()
-        })
-        .padding(Padding::from([3, 10]))
+fn group_header(label: String) -> Element<'static, ContactListMsg> {
+    container(text(label).size(12).color(MsnTheme::GROUP))
+        .padding(Padding::from([4, 8]))
         .width(Length::Fill)
         .into()
 }

@@ -10,4 +10,4 @@ widgets = ["dep:iced"]
 [dependencies]
 uuid = { workspace = true }
 serde = { workspace = true }
-iced = { version = "0.13", optional = true, features = ["image"] }
+iced = { version = "0.13", optional = true, features = ["image", "canvas"] }

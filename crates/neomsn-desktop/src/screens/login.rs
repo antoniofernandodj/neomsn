@@ -1,8 +1,11 @@
 use iced::{
-    widget::{button, column, container, row, text, text_input, Space},
+    widget::{button, column, container, text, text_input, Space},
     Alignment, Element, Length, Padding,
 };
-use neomsn_shared::widgets::theme::MsnTheme;
+use neomsn_shared::{
+    domain::user::PresenceStatus,
+    widgets::{buddy_avatar, theme::MsnTheme},
+};
 
 #[derive(Debug, Clone)]
 pub enum LoginMsg {
@@ -34,79 +37,105 @@ impl LoginScreen {
         }
     }
 
-    pub fn view(&self) -> Element<LoginMsg> {
-        let title = text(if self.signup_mode { "Criar conta" } else { "NeoMSN" })
-            .size(28)
-            .color(MsnTheme::TEXT_ON_ACCENT);
+    pub fn view(&self) -> Element<'_, LoginMsg> {
+        // Big buddy avatar in a frame, like the WLM sign-in screen.
+        let avatar = buddy_avatar(PresenceStatus::Online, 110.0);
 
-        let header = container(title)
-            .style(|_| container::Style {
-                background: Some(iced::Background::Color(MsnTheme::HEADER_TOP)),
-                ..Default::default()
-            })
-            .padding(Padding::from([20, 30]))
-            .width(Length::Fill);
+        let field_label = |label: &'static str| {
+            text(label).size(12).color(MsnTheme::TEXT_SECONDARY)
+        };
 
-        let username_field = text_input("Usuário", &self.username)
+        let username_field = text_input("Exemplo: fulano", &self.username)
             .on_input(LoginMsg::UsernameChanged)
-            .padding(8);
+            .on_submit(LoginMsg::Submit)
+            .padding(6)
+            .size(13);
 
-        let password_field = text_input("Senha", &self.password)
+        let password_field = text_input("", &self.password)
             .on_input(LoginMsg::PasswordChanged)
+            .on_submit(LoginMsg::Submit)
             .secure(true)
-            .padding(8);
+            .padding(6)
+            .size(13);
 
         let mut form = column![
-            text("Usuário").size(13).color(MsnTheme::TEXT_SECONDARY),
+            field_label("Usuário:"),
             username_field,
-            Space::with_height(8),
-            text("Senha").size(13).color(MsnTheme::TEXT_SECONDARY),
+            Space::with_height(6),
+            field_label("Senha:"),
             password_field,
         ]
-        .spacing(4);
+        .spacing(2)
+        .width(Length::Fixed(210.0));
 
         if self.signup_mode {
-            let dn_field = text_input("Nome de exibição", &self.display_name)
-                .on_input(LoginMsg::DisplayNameChanged)
-                .padding(8);
             form = form
-                .push(Space::with_height(8))
-                .push(text("Nome de exibição").size(13).color(MsnTheme::TEXT_SECONDARY))
-                .push(dn_field);
+                .push(Space::with_height(6))
+                .push(field_label("Nome de exibição:"))
+                .push(
+                    text_input("Como seus amigos vão te ver", &self.display_name)
+                        .on_input(LoginMsg::DisplayNameChanged)
+                        .on_submit(LoginMsg::Submit)
+                        .padding(6)
+                        .size(13),
+                );
         }
 
-        let submit_label = if self.loading { "Aguarde…" } else if self.signup_mode { "Criar conta" } else { "Entrar" };
-        let mut submit_btn = button(text(submit_label).size(14)).padding(Padding::from([8, 20]));
+        let submit_label = if self.loading {
+            "Aguarde…"
+        } else if self.signup_mode {
+            "Criar conta"
+        } else {
+            "Entrar"
+        };
+        let mut submit_btn = button(text(submit_label).size(13))
+            .style(MsnTheme::classic_button)
+            .padding(Padding::from([6, 28]));
         if !self.loading {
             submit_btn = submit_btn.on_press(LoginMsg::Submit);
         }
 
-        let toggle_label = if self.signup_mode { "Já tenho conta" } else { "Criar conta" };
+        let toggle_label = if self.signup_mode {
+            "Já tenho uma conta"
+        } else {
+            "Criar uma conta"
+        };
         let toggle_btn = button(text(toggle_label).size(12).color(MsnTheme::ACCENT))
             .style(button::text)
             .on_press(LoginMsg::ToggleSignup);
 
-        let error_row: Element<LoginMsg> = if let Some(e) = &self.error {
+        let error_row: Element<'_, LoginMsg> = if let Some(e) = &self.error {
             text(e).size(12).color(MsnTheme::BUSY).into()
         } else {
             Space::with_height(0).into()
         };
 
-        let actions = row![submit_btn, Space::with_width(Length::Fill), toggle_btn]
-            .align_y(Alignment::Center);
+        let body = column![
+            Space::with_height(26),
+            avatar,
+            Space::with_height(18),
+            form,
+            Space::with_height(12),
+            error_row,
+            Space::with_height(8),
+            submit_btn,
+            Space::with_height(4),
+            toggle_btn,
+        ]
+        .align_x(Alignment::Center)
+        .width(Length::Fill);
 
-        let body = container(
-            column![form, Space::with_height(16), error_row, Space::with_height(8), actions]
-                .spacing(0),
-        )
-        .padding(Padding::from([30, 30]))
-        .max_width(380)
-        .style(|_| container::Style {
-            background: Some(iced::Background::Color(MsnTheme::BG_PANEL)),
-            border: iced::Border { radius: 0.0.into(), ..Default::default() },
-            ..Default::default()
-        });
-
-        column![header, body].into()
+        // Soft white→blue gradient backdrop, like the WLM sign-in window.
+        container(body)
+            .style(|_| container::Style {
+                background: Some(MsnTheme::vertical_gradient(
+                    iced::Color::WHITE,
+                    MsnTheme::HEADER_BOTTOM,
+                )),
+                ..Default::default()
+            })
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
     }
 }

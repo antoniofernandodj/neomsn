@@ -56,6 +56,7 @@ pub async fn handle_connection(stream: TcpStream, state: SharedState) -> Result<
     // Clean up session if authenticated.
     if let Some((uid, did)) = session.identity() {
         state.remove_session(uid, did).await;
+        super::handlers::handle_disconnect(uid, &state).await?;
     }
 
     Ok(())

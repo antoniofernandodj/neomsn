@@ -118,9 +118,14 @@ Os opcodes cobrem tudo que acontece dentro de uma sessão NMP autenticada. Agrup
 
 | Código | Nome              | Direção       | Descrição                                      |
 |--------|-------------------|---------------|------------------------------------------------|
-| 0x10   | MSG_CHUNK         | C→S / S→C     | Fragmento de texto digitado                    |
+| 0x10   | MSG_CHUNK         | C→S / S→C     | Edição do texto: `truncate_to` (bytes) + `delta` |
 | 0x11   | MSG_COMPLETE      | C→S / S→C     | Mensagem finalizada (botão Concluir)           |
 | 0x12   | MSG_DELETE        | C→S / S→C     | Mensagem cancelada antes de ser concluída      |
+
+`MSG_CHUNK` carrega qualquer edição, não só acréscimos: o receptor trunca o texto
+acumulado para `truncate_to` bytes (o prefixo comum com o estado anterior) e anexa
+`delta`. Digitação normal é `truncate_to == tamanho atual`; backspace é um
+`truncate_to` menor com `delta` vazio. Apagar todo o texto envia `MSG_DELETE`.
 
 #### Salas (Rooms)
 
@@ -136,6 +141,17 @@ Os opcodes cobrem tudo que acontece dentro de uma sessão NMP autenticada. Agrup
 | 0x27   | ROOM_LIST_RESP    | S→C       | Resposta com lista de salas                    |
 | 0x28   | ROOM_MEMBERS      | S→C       | Membros atuais de uma sala                     |
 | 0x29   | ROOM_EVENT        | S→C       | Evento de sala (membro entrou/saiu/foi banido) |
+| 0x2A   | CHAT_INVITE       | C→S       | Convidar usuário para a conversa atual (DM ou sala) |
+| 0x2B   | CHAT_JOINED       | S→C       | Entrou numa conversa em grupo; lista de membros |
+
+**Conversas em grupo (estilo MSN):** não existe criação explícita de grupo. A partir
+de um DM, qualquer participante envia `CHAT_INVITE` com o `user_id` de um contato
+**online**. O servidor cria uma sala efêmera com os três participantes e envia
+`CHAT_JOINED` a todos (com `origin_context_id` = o DM de origem, para que janelas
+abertas convertam o contexto em vez de abrir outra janela). Convites subsequentes
+adicionam membros à sala (`CHAT_JOINED` para o convidado, `ROOM_EVENT` para os
+demais). Fechar a janela envia `ROOM_LEAVE`; desconexão também conta como saída.
+A sala morre naturalmente quando todos saem — como no MSN.
 
 #### Chats Diretos (DM)
 
@@ -155,8 +171,12 @@ Os opcodes cobrem tudo que acontece dentro de uma sessão NMP autenticada. Agrup
 
 | Código | Nome              | Direção   | Descrição                                         |
 |--------|-------------------|-----------|---------------------------------------------------|
-| 0x50   | SYNC_REQUEST      | C→S       | Solicitar histórico a partir de um cursor         |
-| 0x51   | SYNC_RESPONSE     | S→C       | Lote de mensagens para sincronização              |
+| 0x50   | SYNC_REQUEST      | C→S       | Solicitar histórico de um contexto (últimas N mensagens `complete`) |
+| 0x51   | SYNC_RESPONSE     | S→C       | Lote de mensagens persistidas, em ordem cronológica |
+
+O cliente envia `SYNC_REQUEST { context_type, context_id, limit }` ao abrir uma
+janela de conversa; o servidor responde com as mensagens `complete` mais recentes
+lidas do banco (id, autor, nome do autor, conteúdo).
 
 #### Perfil do Usuário
 
@@ -193,8 +213,10 @@ também passa aqui para manter tudo no canal persistente.
 ### Fluxo de mensagem em streaming
 
 ```
-Usuário digita "Oi"        → MSG_CHUNK  { msg_id: UUID, room/dm, delta: "O" }
-                           → MSG_CHUNK  { msg_id: UUID, room/dm, delta: "i" }
+Usuário digita "Olá"       → MSG_CHUNK  { msg_id: UUID, room/dm, truncate_to: 0, delta: "O" }
+                           → MSG_CHUNK  { msg_id: UUID, room/dm, truncate_to: 1, delta: "l" }
+                           → MSG_CHUNK  { msg_id: UUID, room/dm, truncate_to: 2, delta: "á" }
+Backspace ("Ol")           → MSG_CHUNK  { msg_id: UUID, room/dm, truncate_to: 2, delta: "" }
 Usuário clica em Concluir  → MSG_COMPLETE { msg_id: UUID }
 Próxima digitação          → MSG_CHUNK  { msg_id: NOVO_UUID, ... }
 ```
@@ -243,7 +265,7 @@ neomsn/
 │   │   │       ├── contact_item.rs # item de contato com avatar e status
 │   │   │       ├── chat_bubble.rs  # balão de mensagem (streaming + completo)
 │   │   │       ├── status_dot.rs   # indicador colorido de presença
-│   │   │       ├── emoji.rs        # emoticons inline estilo MSN
+│   │   │       ├── emoji_picker.rs # painel de seleção de emojis
 │   │   │       └── theme.rs        # paleta e estilos MSN para Iced
 │   │   └── Cargo.toml              # depende de iced; compila para native e WASM
 │   │
@@ -558,7 +580,7 @@ Device ──< SyncCursor >── (Room | DirectConversation)
 - Campo de texto na parte inferior (sem botão Enviar)
 - Botão **Concluir** (ou Enter configurável) finaliza a mensagem
 - Indicação visual de "está digitando..." enquanto o outro usuário digita
-- Emoticons inline
+- Emojis: botão na barra do campo de texto abre um painel para injetar emoji na mensagem
 
 ### Tema
 - Paleta baseada no MSN 7/2009: gradientes azuis, branco, cinza claro
@@ -570,13 +592,13 @@ Device ──< SyncCursor >── (Room | DirectConversation)
 ## Comportamento do Streaming de Texto
 
 1. Ao abrir o campo de texto, o cliente gera um `msg_id` (UUID v4).
-2. Cada caractere digitado envia um `MSG_CHUNK` com o delta ao servidor.
+2. Cada edição do campo (digitação, backspace, edição no meio) envia um `MSG_CHUNK` com `truncate_to` (prefixo comum em bytes) + `delta` ao servidor.
 3. O servidor retransmite o chunk para todos os participantes da conversa.
-4. Todos os participantes veem o texto aparecer em tempo real.
+4. Todos os participantes veem o texto aparecer — e ser apagado — em tempo real.
 5. Ao clicar **Concluir** (ou pressionar a tecla configurada), envia `MSG_COMPLETE`.
 6. O servidor persiste a mensagem completa no banco e descarta os chunks intermediários (ou os arquiva conforme configuração).
 7. O cliente gera um novo `msg_id` para a próxima mensagem.
-8. Se o usuário apagar tudo e fechar o campo sem concluir, envia `MSG_DELETE` para limpar o estado nos outros clientes.
+8. Se o usuário apagar todo o texto, envia `MSG_DELETE` para limpar o estado nos outros clientes; um novo `msg_id` é gerado para a próxima digitação.
 
 ---
 
