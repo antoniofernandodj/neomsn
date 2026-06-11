@@ -1,6 +1,7 @@
 mod app;
 mod net;
 mod screens;
+mod sound;
 
 use app::App;
 

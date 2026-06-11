@@ -17,10 +17,11 @@ use crate::{
         nmp::{self, NmpClient, ServerEvent},
     },
     screens::{
-        chat::{ChatMsg, ChatScreen},
+        chat::{ChatMsg, ChatScreen, SHAKE_TICKS},
         contact_list::{ContactListMsg, ContactListScreen, PendingRequest},
         login::{LoginMsg, LoginScreen},
     },
+    sound,
 };
 
 // ─── Top-level message ────────────────────────────────────────────────────────
@@ -40,6 +41,7 @@ pub enum AppMsg {
     Chat(window::Id, ChatMsg),
     WindowOpened(window::Id),
     WindowClosed(window::Id),
+    ShakeTick(window::Id),
 }
 
 // ─── App state ────────────────────────────────────────────────────────────────
@@ -142,7 +144,20 @@ impl App {
             AppMsg::Chat(id, cm)           => self.handle_chat_msg(id, cm),
             AppMsg::WindowOpened(_)        => Task::none(),
             AppMsg::WindowClosed(id)       => self.handle_window_closed(id),
+            AppMsg::ShakeTick(id)          => self.handle_shake_tick(id),
         }
+    }
+
+    fn handle_shake_tick(&mut self, id: window::Id) -> Task<AppMsg> {
+        if let Some(chat) = self.chats.get_mut(&id) {
+            if chat.shake > 0 {
+                chat.shake -= 1;
+                if chat.shake > 0 {
+                    return shake_tick(id);
+                }
+            }
+        }
+        Task::none()
     }
 
     // ── Window lifecycle ─────────────────────────────────────────────────────
@@ -174,7 +189,7 @@ impl App {
     }
 
     /// Open a native window for a conversation and request its history.
-    fn open_chat_window(&mut self, chat: ChatScreen, nmp: &NmpClient) -> Task<AppMsg> {
+    fn open_chat_window(&mut self, chat: ChatScreen, nmp: &NmpClient) -> (window::Id, Task<AppMsg>) {
         nmp.send(Frame::new(
             Opcode::SyncRequest,
             payload::SyncRequest {
@@ -185,7 +200,7 @@ impl App {
         ));
         let (id, task) = window::open(chat_window_settings());
         self.chats.insert(id, chat);
-        task.map(AppMsg::WindowOpened)
+        (id, task.map(AppMsg::WindowOpened))
     }
 
     fn chat_by_context(&mut self, context_id: Uuid) -> Option<&mut ChatScreen> {
@@ -375,7 +390,7 @@ impl App {
                     self_id,
                     self.self_display_name(),
                 );
-                let open = self.open_chat_window(chat, &nmp);
+                let (_, open) = self.open_chat_window(chat, &nmp);
                 return Task::batch([next, open]);
             }
             ServerEvent::MsgChunk(p) => {
@@ -396,7 +411,7 @@ impl App {
                         self_name,
                     );
                     chat.apply_chunk(p.msg_id, p.author_id, &author_name, p.truncate_to as usize, &p.delta);
-                    let open = self.open_chat_window(chat, &nmp);
+                    let (_, open) = self.open_chat_window(chat, &nmp);
                     return Task::batch([next, open]);
                 }
             }
@@ -408,6 +423,38 @@ impl App {
             ServerEvent::MsgDelete(p) => {
                 if let Some(chat) = self.chat_by_context(p.context_id) {
                     chat.delete_message(p.msg_id);
+                }
+            }
+            ServerEvent::Nudge(p) => {
+                let author_name = self.contact_display_name(p.author_id)
+                    .unwrap_or_else(|| "Contato".into());
+                let self_name = self.self_display_name();
+
+                let window_id = self.chats.iter()
+                    .find(|(_, c)| c.context_id == p.context_id)
+                    .map(|(id, _)| *id);
+
+                if let Some(id) = window_id {
+                    let chat = self.chats.get_mut(&id).unwrap();
+                    let name = chat.member_name(p.author_id).unwrap_or(&author_name).to_string();
+                    chat.push_system(format!("{name} acabou de chamar a sua atenção!"));
+                    chat.shake = SHAKE_TICKS;
+                    sound::nudge();
+                    return Task::batch([next, shake_tick(id)]);
+                } else if p.context_type == payload::ContextType::Dm {
+                    // Nudge on a closed conversation: pop a window, like MSN.
+                    let mut chat = ChatScreen::new_dm(
+                        p.context_id,
+                        p.author_id,
+                        author_name.clone(),
+                        self_id,
+                        self_name,
+                    );
+                    chat.push_system(format!("{author_name} acabou de chamar a sua atenção!"));
+                    chat.shake = SHAKE_TICKS;
+                    sound::nudge();
+                    let (id, open) = self.open_chat_window(chat, &nmp);
+                    return Task::batch([next, open, shake_tick(id)]);
                 }
             }
             ServerEvent::SyncResponse(p) => {
@@ -439,7 +486,7 @@ impl App {
                     // We were invited: open a window for the group conversation.
                     let mut chat = ChatScreen::new_room(p.room_id, members, self_id);
                     chat.push_system(format!("{} convidou você para esta conversa.", p.inviter_name));
-                    let open = self.open_chat_window(chat, &nmp);
+                    let (_, open) = self.open_chat_window(chat, &nmp);
                     return Task::batch([next, open]);
                 }
             }
@@ -575,9 +622,38 @@ impl App {
                 ));
                 chat.invite_open = false;
             }
+            ChatMsg::Nudge => {
+                // One nudge at a time — ignore while still shaking.
+                if chat.shake > 0 {
+                    return Task::none();
+                }
+                nmp.send(Frame::new(
+                    Opcode::Nudge,
+                    payload::Nudge {
+                        context_type: to_proto(chat.context_type),
+                        context_id: chat.context_id,
+                        author_id: uid,
+                    }.encode(),
+                ));
+                chat.push_system(format!("Você acabou de chamar a atenção de {}.", chat.title()));
+                // MSN shook the sender's window too.
+                chat.shake = SHAKE_TICKS;
+                sound::nudge();
+                return shake_tick(window_id);
+            }
         }
         Task::none()
     }
+}
+
+// ─── Nudge shake animation ────────────────────────────────────────────────────
+
+/// Schedule the next shake animation frame for a chat window.
+fn shake_tick(id: window::Id) -> Task<AppMsg> {
+    Task::perform(
+        tokio::time::sleep(std::time::Duration::from_millis(30)),
+        move |_| AppMsg::ShakeTick(id),
+    )
 }
 
 // ─── Streaming input edits ────────────────────────────────────────────────────

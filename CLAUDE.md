@@ -121,6 +121,7 @@ Os opcodes cobrem tudo que acontece dentro de uma sessão NMP autenticada. Agrup
 | 0x10   | MSG_CHUNK         | C→S / S→C     | Edição do texto: `truncate_to` (bytes) + `delta` |
 | 0x11   | MSG_COMPLETE      | C→S / S→C     | Mensagem finalizada (botão Concluir)           |
 | 0x12   | MSG_DELETE        | C→S / S→C     | Mensagem cancelada antes de ser concluída      |
+| 0x13   | NUDGE             | C→S / S→C     | Chamar atenção: sacode a janela dos demais participantes e toca um som (efêmero, não persistido) |
 
 `MSG_CHUNK` carrega qualquer edição, não só acréscimos: o receptor trunca o texto
 acumulado para `truncate_to` bytes (o prefixo comum com o estado anterior) e anexa
@@ -581,6 +582,7 @@ Device ──< SyncCursor >── (Room | DirectConversation)
 - Botão **Concluir** (ou Enter configurável) finaliza a mensagem
 - Indicação visual de "está digitando..." enquanto o outro usuário digita
 - Emojis: botão na barra do campo de texto abre um painel para injetar emoji na mensagem
+- **Chamar atenção** (nudge): botão na toolbar sacode a tela de todos na conversa (incluindo quem enviou) e toca um buzz; abre a janela se estiver fechada, como no MSN
 
 ### Tema
 - Paleta baseada no MSN 7/2009: gradientes azuis, branco, cinza claro

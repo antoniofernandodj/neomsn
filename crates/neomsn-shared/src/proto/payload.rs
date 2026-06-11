@@ -279,6 +279,35 @@ impl MsgDelete {
     }
 }
 
+// ─── 0x13  NUDGE ─────────────────────────────────────────────────────────────
+// "Chamar atenção": shakes the conversation window of everyone else in the
+// context and plays a buzz. Ephemeral — relayed, never persisted.
+
+#[derive(Debug, Clone)]
+pub struct Nudge {
+    pub context_type: ContextType,
+    pub context_id: Uuid,
+    pub author_id: Uuid,
+}
+
+impl Nudge {
+    pub fn encode(&self) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u8(self.context_type as u8);
+        w.uuid(&self.context_id);
+        w.uuid(&self.author_id);
+        w.finish()
+    }
+    pub fn decode(buf: &[u8]) -> Result<Self, DecodeError> {
+        let mut r = Reader::new(buf);
+        Ok(Self {
+            context_type: ContextType::try_from(r.u8()?)?,
+            context_id: r.uuid()?,
+            author_id: r.uuid()?,
+        })
+    }
+}
+
 // ─── 0x24  ROOM_JOIN ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]

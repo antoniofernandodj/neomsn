@@ -20,7 +20,14 @@ pub enum ChatMsg {
     Invite(Uuid),
     ToggleEmoji,
     EmojiPicked(&'static str),
+    Nudge,
 }
+
+/// Number of animation ticks a nudge shake lasts (see `SHAKE_PATTERN`).
+pub const SHAKE_TICKS: u8 = 14;
+
+/// Content offsets cycled through while shaking, in logical pixels.
+const SHAKE_PATTERN: [(f32, f32); 4] = [(8.0, 0.0), (0.0, 8.0), (8.0, 8.0), (0.0, 0.0)];
 
 /// One open conversation window (DM or group/room).
 pub struct ChatScreen {
@@ -36,6 +43,8 @@ pub struct ChatScreen {
     pub invite_open: bool,
     pub emoji_open: bool,
     pub last_received_at: Option<String>,
+    /// Remaining nudge animation ticks; 0 = not shaking.
+    pub shake: u8,
 }
 
 impl ChatScreen {
@@ -57,6 +66,7 @@ impl ChatScreen {
             invite_open: false,
             emoji_open: false,
             last_received_at: None,
+            shake: 0,
         }
     }
 
@@ -72,6 +82,7 @@ impl ChatScreen {
             invite_open: false,
             emoji_open: false,
             last_received_at: None,
+            shake: 0,
         }
     }
 
@@ -215,9 +226,15 @@ impl ChatScreen {
                 .padding(Padding::from([4, 8]))
         };
 
+        let nudge_btn = button(text("Chamar atenção").size(12))
+            .style(MsnTheme::toolbar_button)
+            .on_press(ChatMsg::Nudge)
+            .padding(Padding::from([4, 8]));
+
         let toolbar = container(
             row![
                 invite_btn,
+                nudge_btn,
                 decorative("Enviar arquivos"),
                 decorative("Webcam"),
                 decorative("Jogos"),
@@ -403,7 +420,7 @@ impl ChatScreen {
         .padding(Padding::from([3, 10]))
         .width(Length::Fill);
 
-        column![
+        let root = column![
             to_bar,
             toolbar,
             invite_panel,
@@ -411,7 +428,16 @@ impl ChatScreen {
             input_area,
             Space::with_height(6),
             status_bar,
-        ]
-        .into()
+        ];
+
+        if self.shake == 0 {
+            root.into()
+        } else {
+            // Nudge animation: jolt the whole content around.
+            let (dx, dy) = SHAKE_PATTERN[(self.shake % 4) as usize];
+            container(root)
+                .padding(Padding { top: dy, right: 0.0, bottom: 0.0, left: dx })
+                .into()
+        }
     }
 }

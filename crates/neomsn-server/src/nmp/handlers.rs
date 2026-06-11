@@ -48,6 +48,7 @@ pub async fn dispatch(
         Opcode::MsgChunk      => handle_msg_chunk(frame, session, state).await?,
         Opcode::MsgComplete   => handle_msg_complete(frame, session, state).await?,
         Opcode::MsgDelete     => handle_msg_delete(frame, session, state).await?,
+        Opcode::Nudge         => handle_nudge(frame, session, state).await?,
         Opcode::ContactList   => handle_contact_list(frame, session, state).await?,
         Opcode::ContactAdd    => handle_contact_add(frame, session, state).await?,
         Opcode::ContactRemove => handle_contact_remove(frame, session, state).await?,
@@ -201,6 +202,16 @@ async fn handle_msg_delete(frame: Frame, session: &mut SessionState, state: &Sha
         am.update(&state.db).await?;
     }
 
+    broadcast_to_context(&p.context_type, p.context_id, user_id, frame, state).await;
+    Ok(())
+}
+
+// ─── NUDGE ────────────────────────────────────────────────────────────────────
+// Ephemeral: relay to everyone else in the context, nothing persisted.
+
+async fn handle_nudge(frame: Frame, session: &mut SessionState, state: &SharedState) -> Result<()> {
+    let p = payload::Nudge::decode(&frame.payload).map_err(|_| anyhow::anyhow!("decode"))?;
+    let user_id = session.user_id.unwrap();
     broadcast_to_context(&p.context_type, p.context_id, user_id, frame, state).await;
     Ok(())
 }

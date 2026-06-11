@@ -13,6 +13,7 @@ pub enum Opcode {
     MsgChunk    = 0x10,
     MsgComplete = 0x11,
     MsgDelete   = 0x12,
+    Nudge       = 0x13,
 
     // 0x20–0x2F  Rooms
     RoomCreate   = 0x20,
@@ -77,6 +78,7 @@ impl TryFrom<u8> for Opcode {
             0x10 => Ok(Self::MsgChunk),
             0x11 => Ok(Self::MsgComplete),
             0x12 => Ok(Self::MsgDelete),
+            0x13 => Ok(Self::Nudge),
             0x20 => Ok(Self::RoomCreate),
             0x21 => Ok(Self::RoomCreateOk),
             0x22 => Ok(Self::RoomUpdate),
